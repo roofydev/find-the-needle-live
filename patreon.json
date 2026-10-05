@@ -1,0 +1,10 @@
+{
+  "pageUrl": "https://www.patreon.com/FindTheNeedle",
+  "supportersUrl": "https://roofydev.github.io/find-the-needle-live/supporters.json",
+  "tiers": [
+    { "id": 1, "name": "Seedling", "priceUsd": 3 },
+    { "id": 2, "name": "Farmhand", "priceUsd": 7 },
+    { "id": 3, "name": "Golden Needle", "priceUsd": 15 }
+  ],
+  "note": "Credits only: no in-world advantages for patrons (Creator Economy parity, GDD 21.6). Tier ids map to Patreon tiers by name in Tools/Community/patreon_sync.py."
+}

@@ -1,0 +1,69 @@
+name: Sync supporters and publish data
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: supporters-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pages: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Pull active patrons if configured
+        env:
+          PATREON_CREATOR_TOKEN: ${{ secrets.PATREON_CREATOR_TOKEN }}
+        run: |
+          if [ -z "$PATREON_CREATOR_TOKEN" ]; then
+            echo "Patreon token is not configured; publishing the existing list." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          python tools/patreon_sync.py --root . --out supporters.json
+          git config user.name "supporters-bot"
+          git config user.email "supporters-bot@users.noreply.github.com"
+          git add supporters.json
+          if ! git diff --cached --quiet; then
+            git commit -m "Update supporters"
+            git push
+          fi
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+      - name: Prepare public data
+        run: |
+          mkdir _site
+          cp supporters.json patreon.json _site/
+          touch _site/.nojekyll
+      - name: Upload data
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Publish data
+        id: deployment
+        uses: actions/deploy-pages@v4
