@@ -1,15 +1,16 @@
-"""Publish the Supporters board list from Patreon, opt-in only (GH #104).
+"""Automatically publish active paid supporters' Patreon display names (GH #104).
 
-Privacy rules (fail closed):
-- Patreon is asked only for patron_status and entitled tiers. Names, emails, member pledge details are never requested.
-- A member appears ONLY if the protected alias map gives them an alias with "consent": true. Everyone else is left out.
-- The public JSON holds just {"name": alias, "tier": 1..3}. Member ids never leave this process; logs print counts only.
+The tier and About page explain automatic public credits before membership.
+- Request only full_name (Patreon profile display name), patron_status and entitled tiers; never emails or payment details.
+- Hidden/missing Patreon names are omitted. Protected per-member overrides can change a name or hide it.
+- Public JSON holds just {"name": display_name, "tier": 1..3}; logs print counts, never ids or names.
 
 Inputs (environment, never committed):
   PATREON_CREATOR_TOKEN  creator access token (GitHub Actions secret)
-  SUPPORTER_ALIASES      protected alias map (GitHub Actions secret), JSON:
-                         {"version": 1, "members": {"<patreon member id>": {"alias": "Shown Name", "consent": true}}}
-                         Missing or empty -> nobody is listed. Malformed -> exit 2, nothing written.
+  SUPPORTER_ALIASES      optional protected overrides (GitHub Actions secret), JSON:
+                         {"version": 1, "members": {"<member id>": {"alias": "Chosen Name"}, "<another id>": {"hidden": true}}}
+                         Missing/empty -> use available Patreon names. Malformed -> exit 2, nothing written.
+                         Legacy consent:true aliases still work; consent:false means hidden.
 
     python Tools/Community/patreon_sync.py [--root DIR] [--out FILE]
 
@@ -50,7 +51,7 @@ def clean_alias(value):
 
 
 def parse_alias_map(raw):
-    """Returns {member_id: alias} for consenting members. Empty input -> {}. Malformed -> AliasMapError."""
+    """Returns {member_id: alias | None}; None hides a member. Malformed overrides stop publication."""
     if raw is None or not raw.strip():
         return {}
     try:
@@ -61,18 +62,22 @@ def parse_alias_map(raw):
         raise AliasMapError('alias map must be {"version": 1, "members": {...}}')
     aliases = {}
     for member_id, entry in data["members"].items():
-        if not isinstance(member_id, str) or not isinstance(entry, dict):
-            raise AliasMapError("alias map entries must be {\"alias\": str, \"consent\": true|false}")
-        if entry.get("consent") is not True:
+        if not isinstance(member_id, str) or not member_id or not isinstance(entry, dict):
+            raise AliasMapError("override entries must be objects keyed by member id")
+        if any(key in entry and not isinstance(entry[key], bool) for key in ("hidden", "consent")):
+            raise AliasMapError("hidden and legacy consent must be booleans")
+        if entry.get("hidden") is True or entry.get("consent") is False:
+            aliases[member_id] = None
             continue
         alias = clean_alias(entry.get("alias"))
-        if alias:
-            aliases[member_id] = alias
+        if not alias:
+            raise AliasMapError("a visible override needs a nonempty display-safe alias")
+        aliases[member_id] = alias
     return aliases
 
 
 def build_supporters(pages, tier_ids, aliases):
-    """pages: Patreon /members responses. Returns the public list [{"name", "tier"}] (opted-in active paid members)."""
+    """Return public names/tiers for active paid members, honoring hidden names and protected overrides."""
     out = {}
     for page in pages:
         if not isinstance(page, dict):
@@ -85,11 +90,14 @@ def build_supporters(pages, tier_ids, aliases):
             if not isinstance(m, dict):
                 continue
             member_id = m.get("id")
-            if member_id not in aliases:
-                continue                                    # no consent on file: never listed
+            if not isinstance(member_id, str) or not member_id:
+                continue
             attrs = m.get("attributes") if isinstance(m.get("attributes"), dict) else {}
             if attrs.get("patron_status") != "active_patron":
                 continue                                    # former / declined / deleted members
+            name = clean_alias(aliases[member_id] if member_id in aliases else attrs.get("full_name"))
+            if not name:
+                continue                                    # opt-out, identity hidden, or missing name: no fallback
             rel = (((m.get("relationships") or {}).get("currently_entitled_tiers") or {}).get("data")) or []
             paid = []
             for ref in rel if isinstance(rel, list) else []:
@@ -103,14 +111,14 @@ def build_supporters(pages, tier_ids, aliases):
             title = best.get("title") if isinstance(best.get("title"), str) else ""
             tier = tier_ids.get(title.strip().lower(), 1)
             if member_id not in out or tier > out[member_id]["tier"]:
-                out[member_id] = {"name": aliases[member_id], "tier": tier}
+                out[member_id] = {"name": name, "tier": tier}
     listed = sorted(out.values(), key=lambda s: (-s["tier"], s["name"].lower()))
     return listed[:MAX_SUPPORTERS]
 
 
 def fetch_pages(token):
     def get(url):
-        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}", "User-Agent": "FindTheNeedle-SupportersSync/2.0"})
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}", "User-Agent": "FindTheNeedle-SupportersSync/3.0"})
         with urllib.request.urlopen(req, timeout=30) as r:
             return json.load(r)
 
@@ -119,7 +127,7 @@ def fetch_pages(token):
         return []
     query = urllib.parse.urlencode({
         "include": "currently_entitled_tiers",
-        "fields[member]": "patron_status",
+        "fields[member]": "full_name,patron_status",
         "fields[tier]": "title,amount_cents",
         "page[count]": "500",
     })
@@ -156,7 +164,7 @@ def main(argv=None):
     supporters = build_supporters(fetch_pages(token), tier_ids, aliases)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({"updated": date.today().isoformat(), "supporters": supporters}, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    print(f"{len(supporters)} opted-in supporter(s) published ({len(aliases)} alias(es) on file).")
+    print(f"{len(supporters)} active paid supporter(s) published; {len(aliases)} protected override(s) configured.")
     return 0
 
 

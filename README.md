@@ -2,28 +2,35 @@
 
 Public data for the **Find the Needle** VRChat world, read with VRChat String Loading (`*.github.io` is trusted):
 
-- `supporters.json`: the lobby Supporters board. **Opt-in aliases and tier numbers only.**
+- `supporters.json`: the lobby Supporters board. **Display names and tier numbers only.**
 
-## Privacy (GH #104)
+## Automatic credits (GH #104, owner preference 2026-10-05)
 
-The sync never requests patron names or emails from Patreon. A patron appears only after they ask to be listed and
-choose an alias; that choice lives in the **`SUPPORTER_ALIASES` Actions secret**, never in this public repo:
+Active paid members appear automatically using the profile display name returned by Patreon API v2 (`member.full_name`).
+The membership tier and About page explain this before joining and offer a different name or removal by message.
+The workflow refreshes hourly (GitHub may delay scheduled runs); the world loads the current feed on instance join.
+No world re-upload is needed for membership/name changes.
+
+**`SUPPORTER_ALIASES` is an optional Actions secret** for chosen names and opt-outs, never a public mapping:
 
 ```json
-{"version": 1, "members": {"<patreon member id>": {"alias": "Shown Name", "consent": true}}}
+{"version": 1, "members": {"<member id>": {"alias": "Chosen Name"}, "<another id>": {"hidden": true}}}
 ```
 
-- `consent` must be exactly `true`; anything else, a missing entry, or an alias that cleans to nothing leaves the
-  member out (fail closed). Aliases are stripped of `<>{}\`, control and invisible characters and cut to 28 chars.
+- Missing/empty overrides use Patreon display names automatically. Patreon identity masking, null/empty names,
+  and `hidden: true` omit a member; names never fall back to email, member id or another account field.
+- An explicit chosen alias replaces the Patreon name. Legacy `consent: true` aliases work; `consent: false` hides
+  a member. Names lose `<>{}\`, control and invisible characters and are cut to 28 characters.
 - A malformed secret stops the sync with exit code 2 and leaves `supporters.json` unchanged.
 - Former, declined and free members are never listed. A paid tier whose title isn't in `patreon.json` counts as 1.
-- Logs print counts only. Member ids, names, emails and pledge amounts never reach the output or the commit.
-- To remove someone: delete their entry (or set `"consent": false`) and run the workflow.
+- Logs print counts only. The public feed contains display name + tier; member ids, emails and payment details are never published.
+- To hide someone: set `"hidden": true` and run the workflow. **Deleting an override restores automatic naming.**
+- To change a name: set a chosen `alias` and run the workflow. Patreon profile changes also propagate automatically.
 - Patreon member ids: Patreon creator page → Audience → a member's page URL, or the API `/campaigns/{id}/members`.
 
 ## Secrets
 
 - `PATREON_CREATOR_TOKEN`: creator access token (https://www.patreon.com/portal/registration/register-clients).
-- `SUPPORTER_ALIASES`: the alias map above (may be empty: nobody is listed).
+- `SUPPORTER_ALIASES`: optional overrides above (may be empty: automatic naming).
 
-Privacy tests run before every sync: `python -m unittest discover -s tools/tests`.
+Tests run before every sync: `python -m unittest discover -s tools/tests` (18 passing).

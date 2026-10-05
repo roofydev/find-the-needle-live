@@ -5,18 +5,19 @@
     {
       "id": 1,
       "name": "Seedling",
-      "priceUsd": 3
+      "priceEur": 3,
+      "published": true
     },
     {
       "id": 2,
       "name": "Farmhand",
-      "priceUsd": 7
+      "published": false
     },
     {
       "id": 3,
       "name": "Golden Needle",
-      "priceUsd": 15
+      "published": false
     }
   ],
-  "note": "Credits only: no in-world advantages for patrons (Creator Economy parity, GDD 21.6). Tier names match Patreon tier titles (patreon_sync.py). Names are opt-in aliases from the protected SUPPORTER_ALIASES secret (GH #104)."
+  "note": "Launch membership: Seedling EUR 3/month; rows 2 and 3 are reserved, with no paid tiers launched. Credits only: no in-world advantages. Active paid Patreon display names sync automatically; protected SUPPORTER_ALIASES overrides allow chosen names and opt-outs. Hidden or missing Patreon names are omitted (GH #104, owner preference 2026-10-05)."
 }

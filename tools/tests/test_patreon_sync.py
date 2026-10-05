@@ -1,4 +1,4 @@
-"""GH #104 supporter privacy: python -m unittest discover -s Tools/Community/tests -v"""
+"""GH #104 automatic membership sync: python -m unittest discover -s Tools/Community/tests -v"""
 
 import importlib.util
 import io
@@ -6,6 +6,7 @@ import json
 import os
 import tempfile
 import unittest
+import urllib.parse
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
@@ -18,7 +19,7 @@ spec.loader.exec_module(ps)
 TIERS = {"seedling": 1, "farmhand": 2, "golden needle": 3}
 
 
-def member(mid, status="active_patron", tiers=("t1",), name="Legal Name", email="x@example.com"):
+def member(mid, status="active_patron", tiers=("t1",), name="PatreonNickname", email="x@example.com"):
     return {"id": mid, "type": "member",
             "attributes": {"patron_status": status, "full_name": name, "email": email, "currently_entitled_amount_cents": 700},
             "relationships": {"currently_entitled_tiers": {"data": [{"id": t, "type": "tier"} for t in tiers]}}}
@@ -42,18 +43,20 @@ def aliases(**entries):
 
 
 class AliasMapTests(unittest.TestCase):
-    def test_empty_map_means_nobody(self):
+    def test_empty_map_needs_no_manual_setup(self):
         self.assertEqual(ps.parse_alias_map(None), {})
         self.assertEqual(ps.parse_alias_map("  "), {})
 
-    def test_only_explicit_true_consent_counts(self):
-        raw = aliases(a={"alias": "Ann", "consent": True}, b={"alias": "Bob", "consent": "yes"},
+    def test_chosen_names_and_both_optout_formats(self):
+        raw = aliases(a={"alias": "Ann", "consent": True}, b={"hidden": True},
                       c={"alias": "Cy"}, d={"alias": "Di", "consent": False})
-        self.assertEqual(ps.parse_alias_map(raw), {"a": "Ann"})
+        self.assertEqual(ps.parse_alias_map(raw), {"a": "Ann", "b": None, "c": "Cy", "d": None})
 
     def test_malformed_maps_are_rejected(self):
         for raw in ['{"version":1,"members":', '[]', '{"members":{}}', '{"version":2,"members":{}}',
-                    '{"version":1,"members":[]}', '{"version":1,"members":{"a":"Ann"}}']:
+                    '{"version":1,"members":[]}', '{"version":1,"members":{"a":"Ann"}}',
+                    aliases(a={"alias": "Bob", "consent": "yes"}), aliases(a={"hidden": "true"}),
+                    aliases(a={}), aliases(a={"alias": "<>"})]:
             with self.assertRaises(ps.AliasMapError, msg=raw):
                 ps.parse_alias_map(raw)
 
@@ -63,21 +66,34 @@ class AliasMapTests(unittest.TestCase):
         self.assertEqual(ps.clean_alias("  Roofy․  "), "Roofy․")
         self.assertEqual(len(ps.clean_alias("x" * 100)), ps.MAX_ALIAS)
         self.assertEqual(ps.clean_alias(42), "")
-        self.assertEqual(ps.parse_alias_map(aliases(a={"alias": "<>", "consent": True})), {})
 
 
 class BuildTests(unittest.TestCase):
-    def test_opted_in_members_get_alias_and_tier_only(self):
+    def test_chosen_names_replace_patreon_names_and_tier_only_is_published(self):
         out = ps.build_supporters([page(member("a", tiers=("t3",)), member("b", tiers=("t1", "t2")))], TIERS,
                                   {"a": "GoldFan", "b": "Helper"})
         self.assertEqual(out, [{"name": "GoldFan", "tier": 3}, {"name": "Helper", "tier": 2}])
         blob = json.dumps(out)
-        for leak in ("Legal Name", "example.com", '"a"', "700", "member"):
+        for leak in ("PatreonNickname", "example.com", '"a"', "700", "member"):
             self.assertNotIn(leak, blob)
 
-    def test_no_consent_is_never_listed(self):
-        self.assertEqual(ps.build_supporters([page(member("a"), member("b"))], TIERS, {}), [])
-        self.assertEqual(ps.build_supporters([page(member("a"))], TIERS, {"zzz": "Other"}), [])
+    def test_new_members_automatically_get_display_names(self):
+        pages = [page(member("a", name="Farmer Ann"), member("b", name="HayFan"))]
+        self.assertEqual(ps.build_supporters(pages, TIERS, {}),
+                         [{"name": "Farmer Ann", "tier": 1}, {"name": "HayFan", "tier": 1}])
+        self.assertEqual(ps.build_supporters(pages, TIERS, {"zzz": "Other"}), ps.build_supporters(pages, TIERS, {}))
+
+    def test_hidden_and_missing_names_never_fall_back_to_email_or_id(self):
+        pages = [page(*[member(str(i), name=name) for i, name in enumerate((None, "", "  ", 42, "<>"))])]
+        self.assertEqual(ps.build_supporters(pages, TIERS, {}), [])
+
+    def test_optout_hides_a_member_even_if_patreon_returns_a_name(self):
+        self.assertEqual(ps.build_supporters([page(member("a"), member("b", name="Visible"))], TIERS, {"a": None}),
+                         [{"name": "Visible", "tier": 1}])
+
+    def test_profile_rename_is_used_on_next_sync(self):
+        self.assertEqual(ps.build_supporters([page(member("a", name="New Nickname"))], TIERS, {}),
+                         [{"name": "New Nickname", "tier": 1}])
 
     def test_inactive_and_free_members_are_hidden(self):
         pages = [page(member("a", status="former_patron"), member("b", status="declined_patron"),
@@ -122,16 +138,40 @@ class MainTests(unittest.TestCase):
 
     def test_logs_hold_counts_only(self):
         code, log = self.run_main({"PATREON_CREATOR_TOKEN": "t", "SUPPORTER_ALIASES": aliases(secretid={"alias": "Ann", "consent": True})},
-                                  [page(member("secretid"), member("other"))])
+                                  [page(member("secretid"), member("other", name=None))])
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(self.out.read_text())["supporters"], [{"name": "Ann", "tier": 1}])
-        for leak in ("secretid", "other", "Legal Name", "Ann"):
+        for leak in ("secretid", "other", "PatreonNickname", "Ann"):
             self.assertNotIn(leak, log)
 
     def test_missing_token_skips(self):
         code, _ = self.run_main({}, [])
         self.assertEqual(code, 0)
         self.assertIn("Keep", self.out.read_text())
+
+    def test_membership_cancellation_removes_a_previously_listed_name(self):
+        code, _ = self.run_main({"PATREON_CREATOR_TOKEN": "t"}, [page(member("a", status="former_patron"))])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(self.out.read_text())["supporters"], [])
+
+    def test_request_fields_are_minimal_and_use_v2(self):
+        requests = []
+        payloads = [{"data": [{"id": "campaign"}]}, page(member("a"))]
+
+        def response(request, timeout):
+            requests.append(request)
+            result = mock.MagicMock()
+            result.__enter__.return_value = io.StringIO(json.dumps(payloads[len(requests) - 1]))
+            return result
+
+        with mock.patch.object(ps.urllib.request, "urlopen", side_effect=response):
+            ps.fetch_pages("test-token")
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(requests[1].full_url).query)
+        self.assertEqual(query["fields[member]"], ["full_name,patron_status"])
+        self.assertEqual(query["include"], ["currently_entitled_tiers"])
+        self.assertNotIn("email", requests[1].full_url)
+        self.assertNotIn("address", requests[1].full_url)
+        self.assertIn("/api/oauth2/v2/", requests[1].full_url)
 
 
 if __name__ == "__main__":
