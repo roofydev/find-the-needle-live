@@ -25,9 +25,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Privacy tests (opt-in aliases only)
+        run: python -m unittest discover -s tools/tests
       - name: Pull active patrons if configured
         env:
           PATREON_CREATOR_TOKEN: ${{ secrets.PATREON_CREATOR_TOKEN }}
+          SUPPORTER_ALIASES: ${{ secrets.SUPPORTER_ALIASES }}
         run: |
           if [ -z "$PATREON_CREATOR_TOKEN" ]; then
             echo "Patreon token is not configured; publishing the existing list." >> "$GITHUB_STEP_SUMMARY"

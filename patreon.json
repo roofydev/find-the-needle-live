@@ -1,10 +1,22 @@
 {
-  "pageUrl": "https://www.patreon.com/FindTheNeedle",
+  "pageUrl": "https://www.patreon.com/c/FindTheNeedle",
   "supportersUrl": "https://roofydev.github.io/find-the-needle-live/supporters.json",
   "tiers": [
-    { "id": 1, "name": "Seedling", "priceUsd": 3 },
-    { "id": 2, "name": "Farmhand", "priceUsd": 7 },
-    { "id": 3, "name": "Golden Needle", "priceUsd": 15 }
+    {
+      "id": 1,
+      "name": "Seedling",
+      "priceUsd": 3
+    },
+    {
+      "id": 2,
+      "name": "Farmhand",
+      "priceUsd": 7
+    },
+    {
+      "id": 3,
+      "name": "Golden Needle",
+      "priceUsd": 15
+    }
   ],
-  "note": "Credits only: no in-world advantages for patrons (Creator Economy parity, GDD 21.6). Tier ids map to Patreon tiers by name in Tools/Community/patreon_sync.py."
+  "note": "Credits only: no in-world advantages for patrons (Creator Economy parity, GDD 21.6). Tier names match Patreon tier titles (patreon_sync.py). Names are opt-in aliases from the protected SUPPORTER_ALIASES secret (GH #104)."
 }

@@ -4,3 +4,9 @@
 __pycache__/
 *.pyc
 _site/
+
+supporter_names.json
+supporter_aliases.json
+.env
+.env.*
+__pycache__/

@@ -1,21 +1,27 @@
-"""Pull active Patreon members into the Supporters board list.
+"""Publish the Supporters board list from Patreon, opt-in only (GH #104).
 
-Stdlib only. Needs the creator access token from https://www.patreon.com/portal/registration/register-clients
-(your client -> "Creator's Access Token") in the PATREON_CREATOR_TOKEN environment variable. Never commit the token.
+Privacy rules (fail closed):
+- Patreon is asked only for patron_status and entitled tiers. Names, emails, member pledge details are never requested.
+- A member appears ONLY if the protected alias map gives them an alias with "consent": true. Everyone else is left out.
+- The public JSON holds just {"name": alias, "tier": 1..3}. Member ids never leave this process; logs print counts only.
 
-    python Tools/Community/patreon_sync.py                    # writes Design/Community/supporters.json
-    python Tools/Community/patreon_sync.py --out live/supporters.json
+Inputs (environment, never committed):
+  PATREON_CREATOR_TOKEN  creator access token (GitHub Actions secret)
+  SUPPORTER_ALIASES      protected alias map (GitHub Actions secret), JSON:
+                         {"version": 1, "members": {"<patreon member id>": {"alias": "Shown Name", "consent": true}}}
+                         Missing or empty -> nobody is listed. Malformed -> exit 2, nothing written.
 
-Tier mapping: a member's highest entitled tier is matched by title against Design/Community/patreon.json "tiers"
-(Seedling=1, Farmhand=2, Golden Needle=3). Unknown tiers count as 1.
-Names: Patreon full name, shortened to "First L." for privacy, unless Design/Community/supporter_names.json maps the
-Patreon member id (or full name) to a chosen in-world name, or to "" to hide that member.
+    python Tools/Community/patreon_sync.py [--root DIR] [--out FILE]
+
+Tier mapping: a member's highest paid entitled tier is matched by title against patreon.json "tiers"
+(Seedling=1, Farmhand=2, Golden Needle=3); another paid tier counts as 1. No paid tier -> not listed.
 """
 
 import argparse
 import json
 import os
 import sys
+import unicodedata
 import urllib.parse
 import urllib.request
 from datetime import date
@@ -23,75 +29,136 @@ from pathlib import Path
 
 API = "https://www.patreon.com/api/oauth2/v2"
 ROOT = Path(__file__).resolve().parents[2]
+MAX_ALIAS = 28
+MAX_SUPPORTERS = 120
 
 
-def get(url, token):
-    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}", "User-Agent": "FindTheNeedle-SupportersSync/1.0"})
-    with urllib.request.urlopen(req, timeout=30) as r:
-        return json.load(r)
+class AliasMapError(ValueError):
+    pass
 
 
-def short_name(full):
-    parts = [p for p in (full or "").split() if p]
-    if not parts:
+def clean_alias(value):
+    """Display-safe alias: no rich-text brackets, control or format characters, trimmed, at most MAX_ALIAS chars."""
+    if not isinstance(value, str):
         return ""
-    return parts[0] if len(parts) == 1 else f"{parts[0]} {parts[-1][0]}."
+    out = []
+    for ch in value:
+        if ch in "<>{}\\" or unicodedata.category(ch) in ("Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"):
+            continue
+        out.append(" " if unicodedata.category(ch) == "Zs" else ch)
+    return " ".join("".join(out).split())[:MAX_ALIAS].strip()
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--root", default=str(ROOT), help="project root, or the live-site repo (configs at its top level)")
-    ap.add_argument("--out", default=None)
-    args = ap.parse_args()
-    root = Path(args.root).resolve()
-    cfg_dir = root / "Design/Community" if (root / "Design/Community/patreon.json").exists() else root
-    out = Path(args.out) if args.out else cfg_dir / "supporters.json"
-    token = os.environ.get("PATREON_CREATOR_TOKEN")
-    if not token:
-        sys.exit("Set PATREON_CREATOR_TOKEN (creator access token).")
+def parse_alias_map(raw):
+    """Returns {member_id: alias} for consenting members. Empty input -> {}. Malformed -> AliasMapError."""
+    if raw is None or not raw.strip():
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise AliasMapError(f"alias map is not JSON (line {e.lineno})") from None
+    if not isinstance(data, dict) or data.get("version") != 1 or not isinstance(data.get("members"), dict):
+        raise AliasMapError('alias map must be {"version": 1, "members": {...}}')
+    aliases = {}
+    for member_id, entry in data["members"].items():
+        if not isinstance(member_id, str) or not isinstance(entry, dict):
+            raise AliasMapError("alias map entries must be {\"alias\": str, \"consent\": true|false}")
+        if entry.get("consent") is not True:
+            continue
+        alias = clean_alias(entry.get("alias"))
+        if alias:
+            aliases[member_id] = alias
+    return aliases
 
-    config = json.loads((cfg_dir / "patreon.json").read_text(encoding="utf-8"))
-    tier_ids = {t["name"].lower(): t["id"] for t in config["tiers"]}
-    names_file = cfg_dir / "supporter_names.json"
-    overrides = json.loads(names_file.read_text(encoding="utf-8")) if names_file.exists() else {}
 
-    campaigns = get(f"{API}/campaigns", token)["data"]
+def build_supporters(pages, tier_ids, aliases):
+    """pages: Patreon /members responses. Returns the public list [{"name", "tier"}] (opted-in active paid members)."""
+    out = {}
+    for page in pages:
+        if not isinstance(page, dict):
+            continue
+        tiers = {}
+        for t in page.get("included") or []:
+            if isinstance(t, dict) and t.get("type") == "tier" and isinstance(t.get("attributes"), dict):
+                tiers[t.get("id")] = t["attributes"]
+        for m in page.get("data") or []:
+            if not isinstance(m, dict):
+                continue
+            member_id = m.get("id")
+            if member_id not in aliases:
+                continue                                    # no consent on file: never listed
+            attrs = m.get("attributes") if isinstance(m.get("attributes"), dict) else {}
+            if attrs.get("patron_status") != "active_patron":
+                continue                                    # former / declined / deleted members
+            rel = (((m.get("relationships") or {}).get("currently_entitled_tiers") or {}).get("data")) or []
+            paid = []
+            for ref in rel if isinstance(rel, list) else []:
+                t = tiers.get(ref.get("id")) if isinstance(ref, dict) else None
+                cents = t.get("amount_cents") if t else None
+                if isinstance(cents, int) and cents > 0:
+                    paid.append(t)
+            if not paid:
+                continue
+            best = max(paid, key=lambda t: t["amount_cents"])
+            title = best.get("title") if isinstance(best.get("title"), str) else ""
+            tier = tier_ids.get(title.strip().lower(), 1)
+            if member_id not in out or tier > out[member_id]["tier"]:
+                out[member_id] = {"name": aliases[member_id], "tier": tier}
+    listed = sorted(out.values(), key=lambda s: (-s["tier"], s["name"].lower()))
+    return listed[:MAX_SUPPORTERS]
+
+
+def fetch_pages(token):
+    def get(url):
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}", "User-Agent": "FindTheNeedle-SupportersSync/2.0"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.load(r)
+
+    campaigns = get(f"{API}/campaigns").get("data") or []
     if not campaigns:
-        sys.exit("No campaign on this Patreon account yet.")
-    campaign = campaigns[0]["id"]
-
+        return []
     query = urllib.parse.urlencode({
         "include": "currently_entitled_tiers",
-        "fields[member]": "full_name,patron_status,pledge_relationship_start",
+        "fields[member]": "patron_status",
         "fields[tier]": "title,amount_cents",
         "page[count]": "500",
     })
-    url = f"{API}/campaigns/{campaign}/members?{query}"
-    supporters = []
-    while url:
-        page = get(url, token)
-        tiers = {t["id"]: t["attributes"] for t in page.get("included", []) if t["type"] == "tier"}
-        for m in page["data"]:
-            a = m["attributes"]
-            if a.get("patron_status") != "active_patron":
-                continue
-            entitled = [tiers[t["id"]] for t in m["relationships"]["currently_entitled_tiers"]["data"] if t["id"] in tiers]
-            best = max(entitled, key=lambda t: t.get("amount_cents") or 0, default=None)
-            tier = tier_ids.get((best or {}).get("title", "").lower(), 1)
-            full = a.get("full_name") or ""
-            name = overrides.get(m["id"], overrides.get(full, short_name(full)))
-            if not name:
-                continue   # hidden at the member's request
-            supporters.append({"name": name[:28], "tier": tier, "since": (a.get("pledge_relationship_start") or "")[:10]})
-        url = page.get("links", {}).get("next")
+    url = f"{API}/campaigns/{campaigns[0]['id']}/members?{query}"
+    pages = []
+    while url and len(pages) < 50:
+        page = get(url)
+        pages.append(page)
+        url = (page.get("links") or {}).get("next")
+    return pages
 
-    supporters.sort(key=lambda s: (-s["tier"], s["since"] or "9999", s["name"].lower()))
-    for s in supporters:
-        s.pop("since")
+
+def main(argv=None):
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--root", default=str(ROOT), help="project root, or the live-site repo (configs at its top level)")
+    ap.add_argument("--out", default=None)
+    args = ap.parse_args(argv)
+    root = Path(args.root).resolve()
+    cfg_dir = root / "Design/Community" if (root / "Design/Community/patreon.json").exists() else root
+    out = Path(args.out) if args.out else cfg_dir / "supporters.json"
+
+    token = os.environ.get("PATREON_CREATOR_TOKEN")
+    if not token:
+        print("PATREON_CREATOR_TOKEN not set: nothing synced.")
+        return 0
+    try:
+        aliases = parse_alias_map(os.environ.get("SUPPORTER_ALIASES"))
+    except AliasMapError as e:
+        print(f"SUPPORTER_ALIASES rejected ({e}); supporters.json left unchanged.", file=sys.stderr)
+        return 2
+
+    config = json.loads((cfg_dir / "patreon.json").read_text(encoding="utf-8"))
+    tier_ids = {t["name"].strip().lower(): int(t["id"]) for t in config["tiers"]}
+    supporters = build_supporters(fetch_pages(token), tier_ids, aliases)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({"updated": date.today().isoformat(), "supporters": supporters}, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    print(f"{len(supporters)} active supporter(s) -> {out}")
+    print(f"{len(supporters)} opted-in supporter(s) published ({len(aliases)} alias(es) on file).")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
