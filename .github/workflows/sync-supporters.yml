@@ -25,8 +25,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Supporter sync tests (automatic names and opt-outs)
+      - name: Tests (supporter sync and event hours)
         run: python -m unittest discover -s tools/tests
+      - name: Check the event-hours file
+        run: python tools/check_remote_config.py remote-config.json
       - name: Pull active patrons if configured
         env:
           PATREON_CREATOR_TOKEN: ${{ secrets.PATREON_CREATOR_TOKEN }}
@@ -49,7 +51,7 @@ jobs:
       - name: Prepare public data
         run: |
           mkdir _site
-          cp supporters.json patreon.json _site/
+          cp supporters.json patreon.json remote-config.json _site/
           touch _site/.nojekyll
       - name: Upload data
         uses: actions/upload-pages-artifact@v4

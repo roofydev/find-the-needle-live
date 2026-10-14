@@ -1,0 +1,14 @@
+{
+  "_help": [
+    "Event hours for Find the Needle. Worlds uploaded from 5 November 2026 read this file when an instance starts and again every 30 minutes. An empty block keeps the built-in schedule.",
+    "Times are Unix seconds in UTC. Example: 1794052800 = Saturday 7 November 2026, 12:00 UTC.",
+    "happy_hour (only while an event like Harvest Moon runs): start_unix, end_unix, cash_mult (1 to 2, Cash on every run) and token_mult (1 to 3, event tokens).",
+    "farm_hour (the free Saturday hour, with or without an event): enabled false switches it off; first_unix moves its first day; hours_utc are the UTC hours the weeks take in turn (0 to 23); minutes is its length (0 to 240); cash_mult and token_mult as above.",
+    "events, by event id (\"1\" = Harvest Moon): start_unix and end_unix move it; enabled false cancels it; enabled true with no start_unix runs it now.",
+    "Running instances keep what they last read until they close, so to stop something early set a time that has passed (for example end_unix) rather than deleting it.",
+    "A mistake in this file fails the publish workflow (tools/check_remote_config.py) and the last good file stays live."
+  ],
+  "happy_hour": {},
+  "farm_hour": {},
+  "events": {}
+}
